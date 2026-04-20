@@ -4,31 +4,32 @@ Build a complete, production-ready Next.js 15 App Router application.
 
 PROJECT: stripe-account-health-monitor
 HEADLINE: Monitor Stripe account for sudden deactivation risks
-WHAT: None
-WHY: None
-WHO PAYS: None
+WHAT: Monitors your Stripe account health 24/7 and alerts you before potential deactivations. Tracks key metrics like chargeback rates, dispute patterns, and compliance flags that could trigger account suspension.
+WHY: Stripe can freeze accounts with little warning, killing revenue overnight. Most founders only discover issues after it's too late. Early detection gives you time to fix problems before losing payment processing.
+WHO PAYS: SaaS founders and e-commerce operators processing $10K+ monthly through Stripe. Especially those in higher-risk verticals or with thin margins who can't afford payment disruptions.
 NICHE: business-tools
 PRICE: $$15/mo
 
 ARCHITECTURE SPEC:
-A Next.js dashboard that connects to Stripe's API to monitor account health metrics, compliance status, and risk indicators. Uses webhooks to track real-time changes and sends alerts when potential deactivation risks are detected.
+A Next.js dashboard that connects to Stripe's API to continuously monitor account health metrics and send real-time alerts via email/SMS when risk thresholds are exceeded. Uses a background job system to fetch data every 15 minutes and stores historical trends in a database.
 
 PLANNED FILES:
 - app/page.tsx
 - app/dashboard/page.tsx
 - app/api/stripe/connect/route.ts
-- app/api/stripe/webhook/route.ts
-- app/api/health-check/route.ts
-- app/api/lemonsqueezy/webhook/route.ts
-- components/HealthScore.tsx
-- components/RiskAlerts.tsx
-- components/MetricsDashboard.tsx
-- lib/stripe-client.ts
-- lib/health-analyzer.ts
+- app/api/stripe/metrics/route.ts
+- app/api/webhooks/stripe/route.ts
+- app/api/alerts/route.ts
+- app/api/cron/monitor/route.ts
+- components/MetricsChart.tsx
+- components/AlertSettings.tsx
+- components/StripeConnect.tsx
+- lib/stripe-monitor.ts
 - lib/alert-system.ts
 - lib/database.ts
+- types/stripe-metrics.ts
 
-DEPENDENCIES: next, react, typescript, tailwindcss, stripe, @lemonsqueezy/lemonsqueezy.js, prisma, @prisma/client, resend, zod, lucide-react
+DEPENDENCIES: next, react, typescript, tailwindcss, stripe, @lemonsqueezy/lemonsqueezy.js, prisma, @prisma/client, recharts, nodemailer, twilio, cron, zod, lucide-react
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)
@@ -68,8 +69,3 @@ After creating all files:
 
 Do NOT use placeholder text. Write real, helpful content for the landing page
 and the tool itself. The tool should actually work and provide value.
-
-
-PREVIOUS ATTEMPT FAILED WITH:
-Codex timed out after 600s
-Please fix the above errors and regenerate.
