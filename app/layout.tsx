@@ -1,59 +1,71 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
-
+import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
-const spaceGrotesk = Space_Grotesk({
+const display = Space_Grotesk({
   subsets: ["latin"],
-  variable: "--font-space-grotesk"
+  variable: "--font-display",
 });
 
-const ibmPlexMono = IBM_Plex_Mono({
-  weight: ["400", "500", "600"],
+const mono = IBM_Plex_Mono({
   subsets: ["latin"],
-  variable: "--font-ibm-plex-mono"
+  variable: "--font-mono",
+  weight: ["400", "500", "600"],
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://stripe-account-health-monitor.com"),
+  metadataBase: new URL("https://stripe-account-health-monitor.example.com"),
   title: {
     default: "Stripe Account Health Monitor",
-    template: "%s | Stripe Account Health Monitor"
+    template: "%s | Stripe Account Health Monitor",
   },
   description:
-    "Monitor Stripe account for sudden deactivation risks with dispute analytics, compliance flag tracking, and instant alerts before payment processing goes down.",
+    "Monitor Stripe account risk signals around disputes, chargebacks, payouts, and compliance before deactivation freezes your revenue.",
   keywords: [
     "Stripe monitoring",
-    "chargeback monitoring",
-    "dispute analytics",
+    "chargeback alerts",
+    "Stripe deactivation risk",
     "SaaS payments",
-    "ecommerce risk monitoring",
-    "Stripe deactivation prevention"
+    "e-commerce risk monitoring",
   ],
   openGraph: {
     title: "Stripe Account Health Monitor",
     description:
-      "24/7 Stripe account risk monitoring for SaaS founders and ecommerce operators. Detect deactivation risk early and protect revenue.",
+      "Get early warning alerts before Stripe account risk issues turn into payment freezes.",
+    url: "https://stripe-account-health-monitor.example.com",
+    siteName: "Stripe Account Health Monitor",
+    images: [
+      {
+        url: "/og-image.svg",
+        width: 1200,
+        height: 630,
+        alt: "Stripe account risk dashboard preview",
+      },
+    ],
+    locale: "en_US",
     type: "website",
-    url: "/",
-    siteName: "Stripe Account Health Monitor"
   },
   twitter: {
     card: "summary_large_image",
     title: "Stripe Account Health Monitor",
     description:
-      "Stay ahead of Stripe deactivation risk with live health metrics and proactive alerts."
+      "Prevent surprise Stripe freezes with real-time account health monitoring and alerts.",
+    images: ["/og-image.svg"],
   },
   robots: {
     index: true,
-    follow: true
-  }
+    follow: true,
+  },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }): React.JSX.Element {
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${spaceGrotesk.variable} ${ibmPlexMono.variable} antialiased`}>{children}</body>
+    <html lang="en" className={`${display.variable} ${mono.variable}`}>
+      <body>{children}</body>
     </html>
   );
 }

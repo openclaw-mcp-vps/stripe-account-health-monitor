@@ -1,87 +1,84 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { NextRequest, NextResponse } from "next/server";
+import { verifyLemonSignature } from "@/lib/alerts";
+import { updateState } from "@/lib/db";
 
-import { NextResponse } from "next/server";
+export const runtime = "nodejs";
 
-import { upsertPaidCustomer } from "@/lib/database";
-
-function secureCompare(a: string, b: string) {
-  const aBuffer = Buffer.from(a, "utf8");
-  const bBuffer = Buffer.from(b, "utf8");
-  if (aBuffer.length !== bBuffer.length) {
-    return false;
-  }
-  return timingSafeEqual(aBuffer, bBuffer);
-}
-
-export async function POST(request: Request) {
-  const webhookSecret = process.env.LEMON_SQUEEZY_WEBHOOK_SECRET;
-  const signature = request.headers.get("x-signature");
-  const payload = await request.text();
-
-  if (!webhookSecret || !signature) {
-    return NextResponse.json({ ok: false, message: "Missing webhook configuration." }, { status: 400 });
-  }
-
-  const digest = createHmac("sha256", webhookSecret).update(payload, "utf8").digest("hex");
-
-  if (!secureCompare(digest, signature)) {
-    return NextResponse.json({ ok: false, message: "Invalid Lemon Squeezy signature." }, { status: 401 });
-  }
-
-  let body: {
-    meta?: { event_name?: string };
-    data?: {
-      id?: string;
-      attributes?: {
-        user_email?: string;
-        status?: string;
-      };
+interface LemonWebhookPayload {
+  meta?: {
+    event_name?: string;
+  };
+  data?: {
+    attributes?: {
+      user_email?: string;
+      customer_email?: string;
+      status?: string;
+      cancelled?: boolean;
     };
   };
+}
+
+function pickEmail(payload: LemonWebhookPayload) {
+  const email = payload.data?.attributes?.user_email ?? payload.data?.attributes?.customer_email;
+  return email?.trim().toLowerCase() ?? "";
+}
+
+export async function POST(request: NextRequest) {
+  const rawBody = await request.text();
+  const signature = request.headers.get("x-signature");
+
+  if (!verifyLemonSignature(rawBody, signature)) {
+    return NextResponse.json({ error: "Invalid Lemon Squeezy webhook signature." }, { status: 401 });
+  }
+
+  let payload: LemonWebhookPayload;
 
   try {
-    body = JSON.parse(payload);
+    payload = JSON.parse(rawBody) as LemonWebhookPayload;
   } catch {
-    return NextResponse.json({ ok: false, message: "Malformed JSON payload." }, { status: 400 });
+    return NextResponse.json({ error: "Malformed JSON payload." }, { status: 400 });
   }
 
-  const eventName = body.meta?.event_name;
-  const email = body.data?.attributes?.user_email;
+  const eventName = payload.meta?.event_name ?? "unknown";
+  const email = pickEmail(payload);
 
   if (!email) {
-    return NextResponse.json({ ok: true, ignored: true });
+    return NextResponse.json({ received: true, event: eventName, skipped: "No customer email in payload" });
   }
 
-  const subscriptionStatus = body.data?.attributes?.status;
+  await updateState((current) => {
+    const shouldMarkPaid = [
+      "order_created",
+      "subscription_created",
+      "subscription_payment_success",
+      "subscription_resumed",
+    ].includes(eventName);
 
-  if (
-    eventName === "order_created" ||
-    eventName === "subscription_created" ||
-    eventName === "subscription_resumed" ||
-    (eventName === "subscription_updated" && subscriptionStatus === "active")
-  ) {
-    await upsertPaidCustomer({
-      email,
-      source: "lemonsqueezy",
-      purchasedAt: new Date().toISOString(),
-      orderId: body.data?.id,
-      status: "active",
-    });
-  }
+    const shouldRemovePaid = ["subscription_expired", "subscription_cancelled"].includes(eventName);
 
-  if (
-    eventName === "subscription_cancelled" ||
-    eventName === "subscription_expired" ||
-    (eventName === "subscription_updated" && subscriptionStatus === "cancelled")
-  ) {
-    await upsertPaidCustomer({
-      email,
-      source: "lemonsqueezy",
-      purchasedAt: new Date().toISOString(),
-      orderId: body.data?.id,
-      status: "refunded",
-    });
-  }
+    let paidCustomers = current.paidCustomers;
 
-  return NextResponse.json({ ok: true });
+    if (shouldMarkPaid && !paidCustomers.some((customer) => customer.email === email)) {
+      paidCustomers = [
+        ...paidCustomers,
+        {
+          email,
+          createdAt: new Date().toISOString(),
+          source: "lemonsqueezy_webhook",
+        },
+      ];
+    }
+
+    if (shouldRemovePaid) {
+      paidCustomers = paidCustomers.filter((customer) => customer.email !== email);
+    }
+
+    return {
+      ...current,
+      paidCustomers,
+      pendingCheckoutEmails: current.pendingCheckoutEmails.filter((pending) => pending !== email),
+    };
+  });
+
+  return NextResponse.json({ received: true, event: eventName, email });
 }

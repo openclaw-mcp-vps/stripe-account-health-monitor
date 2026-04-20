@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="80" y1="48" x2="1118" y2="588" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0d1117" />
+      <stop offset="1" stop-color="#131a24" />
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)" />
+  <circle cx="1040" cy="10" r="280" fill="#58A6FF" fill-opacity="0.14" />
+  <circle cx="160" cy="560" r="260" fill="#3FB950" fill-opacity="0.14" />
+  <rect x="126" y="112" width="948" height="410" rx="20" fill="#161B22" stroke="#2F3B4A" />
+  <text x="186" y="212" fill="#E6EDF3" font-family="Space Grotesk, sans-serif" font-size="58" font-weight="700">
+    Stripe Account Health Monitor
+  </text>
+  <text x="186" y="272" fill="#8B949E" font-family="Space Grotesk, sans-serif" font-size="30">
+    Catch chargeback and compliance risk before deactivation.
+  </text>
+  <text x="186" y="378" fill="#3FB950" font-family="IBM Plex Mono, monospace" font-size="30" font-weight="600">
+    Risk Score: 18/100   Status: Stable
+  </text>
+  <text x="186" y="434" fill="#58A6FF" font-family="IBM Plex Mono, monospace" font-size="28">
+    Alerts in real time · Email + SMS · Stripe webhooks
+  </text>
+</svg>

@@ -11,25 +11,24 @@ NICHE: business-tools
 PRICE: $$15/mo
 
 ARCHITECTURE SPEC:
-A Next.js dashboard that connects to Stripe's API to continuously monitor account health metrics and send real-time alerts via email/SMS when risk thresholds are exceeded. Uses a background job system to fetch data every 15 minutes and stores historical trends in a database.
+A Next.js dashboard that connects to Stripe's API to continuously monitor account health metrics like chargeback rates, dispute patterns, and compliance flags. Uses webhooks and scheduled jobs to track changes and send email/SMS alerts when thresholds are exceeded that could indicate deactivation risk.
 
 PLANNED FILES:
 - app/page.tsx
 - app/dashboard/page.tsx
 - app/api/stripe/connect/route.ts
-- app/api/stripe/metrics/route.ts
-- app/api/webhooks/stripe/route.ts
+- app/api/stripe/webhook/route.ts
+- app/api/monitor/route.ts
 - app/api/alerts/route.ts
-- app/api/cron/monitor/route.ts
-- components/MetricsChart.tsx
+- components/MetricCard.tsx
 - components/AlertSettings.tsx
 - components/StripeConnect.tsx
-- lib/stripe-monitor.ts
-- lib/alert-system.ts
-- lib/database.ts
-- types/stripe-metrics.ts
+- lib/stripe.ts
+- lib/monitoring.ts
+- lib/alerts.ts
+- lib/db.ts
 
-DEPENDENCIES: next, react, typescript, tailwindcss, stripe, @lemonsqueezy/lemonsqueezy.js, prisma, @prisma/client, recharts, nodemailer, twilio, cron, zod, lucide-react
+DEPENDENCIES: next, react, typescript, tailwindcss, stripe, @lemonsqueezy/lemonsqueezy.js, prisma, @prisma/client, nodemailer, twilio, recharts, lucide-react, node-cron
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)

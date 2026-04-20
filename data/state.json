@@ -1,0 +1,22 @@
+{
+  "stripeConnection": null,
+  "alertSettings": {
+    "email": {
+      "enabled": true,
+      "to": ""
+    },
+    "sms": {
+      "enabled": false,
+      "to": ""
+    },
+    "thresholds": {
+      "chargebackRate": 0.75,
+      "disputeSpike": 3,
+      "failedPayouts": 1,
+      "complianceFlags": 2
+    }
+  },
+  "monitoringHistory": [],
+  "paidCustomers": [],
+  "pendingCheckoutEmails": []
+}

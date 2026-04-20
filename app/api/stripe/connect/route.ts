@@ -1,61 +1,104 @@
-import { NextResponse } from "next/server";
-import Stripe from "stripe";
-import { z } from "zod";
-
-import { getStripeAccount, upsertStripeAccount } from "@/lib/database";
+import { cookies } from "next/headers";
+import { NextRequest, NextResponse } from "next/server";
+import { readState, updateState } from "@/lib/db";
+import { startMonitoringScheduler } from "@/lib/monitoring";
+import { validateStripeKey } from "@/lib/stripe";
+import type { StripeConnection } from "@/lib/types";
 
 export const runtime = "nodejs";
 
-const connectSchema = z.object({
-  accountId: z.string().min(2),
-  operatorEmail: z.string().email().nullable().optional()
-});
+async function requirePaidAccess() {
+  const cookieStore = await cookies();
+  return cookieStore.get("shm_paid")?.value === "1";
+}
 
-function getStripeClient(): Stripe {
-  const secretKey = process.env.STRIPE_SECRET_KEY;
-  if (!secretKey) {
-    throw new Error("STRIPE_SECRET_KEY is missing");
+export async function GET() {
+  const paid = await requirePaidAccess();
+
+  if (!paid) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  return new Stripe(secretKey);
+  const state = await readState();
+  const connection = state.stripeConnection
+    ? {
+        ...state.stripeConnection,
+        apiKey: `${state.stripeConnection.apiKey.slice(0, 8)}…`,
+      }
+    : null;
+  return NextResponse.json({ connection });
 }
 
-export async function GET(): Promise<NextResponse> {
-  const account = getStripeAccount();
-  return NextResponse.json({ account });
-}
+export async function POST(request: NextRequest) {
+  const paid = await requirePaidAccess();
 
-export async function POST(request: Request): Promise<NextResponse> {
+  if (!paid) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
-    const parsed = connectSchema.safeParse(await request.json());
-    if (!parsed.success) {
-      return NextResponse.json({ error: "Invalid account connection payload" }, { status: 400 });
+    const payload = (await request.json()) as { apiKey?: string };
+    const apiKey = payload.apiKey?.trim();
+
+    if (!apiKey) {
+      return NextResponse.json({ error: "Stripe API key is required." }, { status: 400 });
     }
 
-    const stripe = getStripeClient();
-    const requestedAccount = parsed.data.accountId.trim();
+    if (!apiKey.startsWith("sk_")) {
+      return NextResponse.json(
+        { error: "Invalid Stripe key format. Expected a secret key starting with sk_." },
+        { status: 400 },
+      );
+    }
 
-    const stripeAccount =
-      requestedAccount === "self"
-        ? await stripe.accounts.retrieveCurrent()
-        : await stripe.accounts.retrieve(requestedAccount);
+    const account = await validateStripeKey(apiKey);
 
-    upsertStripeAccount(stripeAccount.id, parsed.data.operatorEmail ?? null);
+    const connection: StripeConnection = {
+      apiKey,
+      accountId: account.accountId,
+      accountName: account.accountName,
+      livemode: account.livemode,
+      connectedAt: new Date().toISOString(),
+    };
+
+    await updateState((current) => ({
+      ...current,
+      stripeConnection: connection,
+    }));
+
+    startMonitoringScheduler();
 
     return NextResponse.json({
-      message: `Connected Stripe account ${stripeAccount.id}`,
-      account: {
-        id: stripeAccount.id,
-        email: stripeAccount.email,
-        country: stripeAccount.country
-      }
+      message: `Connected to ${connection.accountName}.`,
+      connection: {
+        ...connection,
+        apiKey: connection.apiKey.slice(0, 8) + "…",
+      },
     });
   } catch (error) {
     return NextResponse.json(
       {
-        error: (error as Error).message || "Failed to connect Stripe account"
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not connect to Stripe. Check API key permissions and try again.",
       },
-      { status: 500 }
+      { status: 400 },
     );
   }
+}
+
+export async function DELETE() {
+  const paid = await requirePaidAccess();
+
+  if (!paid) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  await updateState((current) => ({
+    ...current,
+    stripeConnection: null,
+  }));
+
+  return NextResponse.json({ message: "Stripe connection removed." });
 }

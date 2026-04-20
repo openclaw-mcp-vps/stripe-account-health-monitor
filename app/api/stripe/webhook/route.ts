@@ -1,54 +1,62 @@
-import { headers } from "next/headers";
-import { NextResponse } from "next/server";
 import Stripe from "stripe";
+import { NextRequest, NextResponse } from "next/server";
+import { runMonitoringCheck } from "@/lib/monitoring";
 
-import { createAlertsFromReport, dispatchEmailAlerts } from "@/lib/alert-system";
-import { addAlerts, addStripeEvent } from "@/lib/database";
-import { buildHealthReport } from "@/lib/health-analyzer";
-import { getStripeAccountSnapshot } from "@/lib/stripe-client";
+export const runtime = "nodejs";
 
-export async function POST(request: Request) {
-  const body = await request.text();
-  const signature = (await headers()).get("stripe-signature");
+const STRIPE_API_VERSION = "2025-08-27.basil";
 
-  if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) {
-    return NextResponse.json({ ok: false, message: "Stripe webhook secret is not configured." }, { status: 400 });
-  }
-
-  if (!signature) {
-    return NextResponse.json({ ok: false, message: "Missing Stripe signature." }, { status: 400 });
-  }
-
-  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-    apiVersion: "2025-02-24.acacia",
-    typescript: true,
+function buildWebhookClient() {
+  const apiKey = process.env.STRIPE_SECRET_KEY ?? "sk_test_placeholder_key";
+  return new Stripe(apiKey, {
+    apiVersion: STRIPE_API_VERSION,
   });
+}
 
-  let event: Stripe.Event;
+export async function POST(request: NextRequest) {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-  try {
-    event = stripe.webhooks.constructEvent(body, signature, process.env.STRIPE_WEBHOOK_SECRET);
-  } catch (error) {
+  if (!webhookSecret) {
     return NextResponse.json(
-      { ok: false, message: `Signature validation failed: ${(error as Error).message}` },
-      { status: 400 }
+      { error: "STRIPE_WEBHOOK_SECRET is required to process Stripe webhooks." },
+      { status: 500 },
     );
   }
 
-  await addStripeEvent({
-    id: event.id,
-    type: event.type,
-    createdAt: new Date(event.created * 1000).toISOString(),
-    payload: event.data.object,
-  });
+  const signature = request.headers.get("stripe-signature");
 
-  if (["account.updated", "capability.updated", "person.updated"].includes(event.type)) {
-    const snapshot = await getStripeAccountSnapshot();
-    const report = buildHealthReport(snapshot);
-    const alerts = createAlertsFromReport(report);
-    await addAlerts(alerts);
-    await dispatchEmailAlerts(alerts);
+  if (!signature) {
+    return NextResponse.json({ error: "Missing stripe-signature header." }, { status: 400 });
   }
 
-  return NextResponse.json({ received: true });
+  try {
+    const payload = await request.text();
+    const stripe = buildWebhookClient();
+    const event = stripe.webhooks.constructEvent(payload, signature, webhookSecret);
+
+    const monitoredEventTypes = new Set([
+      "charge.dispute.created",
+      "charge.dispute.closed",
+      "charge.refunded",
+      "payout.failed",
+      "account.updated",
+    ]);
+
+    if (monitoredEventTypes.has(event.type)) {
+      try {
+        await runMonitoringCheck(`webhook:${event.type}`);
+      } catch (error) {
+        console.error("Webhook-triggered monitor run failed", error);
+      }
+    }
+
+    return NextResponse.json({ received: true, eventType: event.type });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: error instanceof Error ? error.message : "Webhook verification failed.",
+      },
+      { status: 400 },
+    );
+  }
 }

@@ -1,181 +1,168 @@
 "use client";
 
-import { useState } from "react";
-
+import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { AlertSettings as AlertSettingsType } from "@/types/stripe-metrics";
+import type { AlertSettings as AlertSettingsType } from "@/lib/types";
 
 interface AlertSettingsProps {
   initialSettings: AlertSettingsType;
 }
 
-function thresholdToPercent(value: number): string {
-  return (value * 100).toFixed(2);
-}
-
-export function AlertSettings({ initialSettings }: AlertSettingsProps): React.JSX.Element {
+export function AlertSettings({ initialSettings }: AlertSettingsProps) {
   const [settings, setSettings] = useState<AlertSettingsType>(initialSettings);
-  const [isSaving, setIsSaving] = useState(false);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string>("");
+  const [isPending, startTransition] = useTransition();
 
-  async function handleSave(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setIsSaving(true);
-    setStatusMessage(null);
-    setError(null);
+  const update = (
+    path: "email.enabled" | "sms.enabled" | "email.to" | "sms.to",
+    value: string | boolean,
+  ) => {
+    setSettings((current) => {
+      const next = structuredClone(current);
+      if (path === "email.enabled") next.email.enabled = Boolean(value);
+      if (path === "sms.enabled") next.sms.enabled = Boolean(value);
+      if (path === "email.to") next.email.to = String(value);
+      if (path === "sms.to") next.sms.to = String(value);
+      return next;
+    });
+  };
 
-    try {
-      const payload = {
-        emailEnabled: settings.emailEnabled,
-        smsEnabled: settings.smsEnabled,
-        chargebackThreshold: settings.chargebackThreshold,
-        disputeThreshold: settings.disputeThreshold,
-        complianceThreshold: settings.complianceThreshold,
-        riskScoreThreshold: settings.riskScoreThreshold
-      };
+  const updateThreshold = (
+    key: keyof AlertSettingsType["thresholds"],
+    value: number,
+  ) => {
+    setSettings((current) => ({
+      ...current,
+      thresholds: {
+        ...current.thresholds,
+        [key]: Number.isFinite(value) ? value : 0,
+      },
+    }));
+  };
 
+  const onSave = () => {
+    startTransition(async () => {
+      setMessage("");
       const response = await fetch("/api/alerts", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update-settings",
+          settings,
+        }),
       });
 
-      const data = (await response.json()) as { settings?: AlertSettingsType; error?: string };
-      if (!response.ok || !data.settings) {
-        throw new Error(data.error || "Failed to update alert settings");
+      const body = (await response.json()) as { error?: string; message?: string };
+      if (!response.ok) {
+        setMessage(body.error ?? "Failed to save alert settings.");
+        return;
       }
 
-      setSettings(data.settings);
-      setStatusMessage("Alert settings saved. Future monitor runs will use these thresholds.");
-    } catch (requestError) {
-      setError((requestError as Error).message);
-    } finally {
-      setIsSaving(false);
-    }
-  }
+      setMessage(body.message ?? "Alert settings saved.");
+    });
+  };
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Alert Settings</CardTitle>
+        <CardTitle>Alert Configuration</CardTitle>
         <CardDescription>
-          Configure thresholds for email and SMS notifications before Stripe account risk escalates.
+          Configure where risk alerts should be sent and tune thresholds to your tolerance.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <form className="space-y-5" onSubmit={handleSave}>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm">
+      <CardContent className="space-y-6">
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="space-y-2 rounded-lg border border-[#2f3b4a] bg-[#0d1117]/60 p-4">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="email-enabled">Email alerts</Label>
               <input
+                id="email-enabled"
                 type="checkbox"
-                checked={settings.emailEnabled}
-                onChange={(event) =>
-                  setSettings((prev) => ({ ...prev, emailEnabled: event.target.checked }))
-                }
+                checked={settings.email.enabled}
+                onChange={(event) => update("email.enabled", event.target.checked)}
+                className="h-4 w-4 accent-[#3fb950]"
               />
-              Email alerts
-            </label>
-            <label className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm">
+            </div>
+            <Input
+              placeholder="ops@yourcompany.com"
+              value={settings.email.to}
+              onChange={(event) => update("email.to", event.target.value)}
+            />
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-[#2f3b4a] bg-[#0d1117]/60 p-4">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="sms-enabled">SMS alerts</Label>
               <input
+                id="sms-enabled"
                 type="checkbox"
-                checked={settings.smsEnabled}
-                onChange={(event) =>
-                  setSettings((prev) => ({ ...prev, smsEnabled: event.target.checked }))
-                }
+                checked={settings.sms.enabled}
+                onChange={(event) => update("sms.enabled", event.target.checked)}
+                className="h-4 w-4 accent-[#58a6ff]"
               />
-              SMS alerts
-            </label>
+            </div>
+            <Input
+              placeholder="+14155551234"
+              value={settings.sms.to}
+              onChange={(event) => update("sms.to", event.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="chargeback-threshold">Chargeback rate threshold (%)</Label>
+            <Input
+              id="chargeback-threshold"
+              type="number"
+              step="0.01"
+              value={settings.thresholds.chargebackRate}
+              onChange={(event) =>
+                updateThreshold("chargebackRate", Number(event.target.value))
+              }
+            />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="chargebackThreshold">Chargeback threshold (%)</Label>
-              <Input
-                id="chargebackThreshold"
-                type="number"
-                min={0.1}
-                max={10}
-                step={0.01}
-                value={thresholdToPercent(settings.chargebackThreshold)}
-                onChange={(event) =>
-                  setSettings((prev) => ({
-                    ...prev,
-                    chargebackThreshold: Number(event.target.value || "0") / 100
-                  }))
-                }
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="disputeThreshold">Disputes in rolling 30d</Label>
-              <Input
-                id="disputeThreshold"
-                type="number"
-                min={1}
-                max={100}
-                step={1}
-                value={settings.disputeThreshold}
-                onChange={(event) =>
-                  setSettings((prev) => ({
-                    ...prev,
-                    disputeThreshold: Number(event.target.value || "1")
-                  }))
-                }
-              />
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="dispute-spike">Open dispute spike threshold</Label>
+            <Input
+              id="dispute-spike"
+              type="number"
+              value={settings.thresholds.disputeSpike}
+              onChange={(event) => updateThreshold("disputeSpike", Number(event.target.value))}
+            />
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="complianceThreshold">Compliance flags threshold</Label>
-              <Input
-                id="complianceThreshold"
-                type="number"
-                min={0}
-                max={20}
-                step={1}
-                value={settings.complianceThreshold}
-                onChange={(event) =>
-                  setSettings((prev) => ({
-                    ...prev,
-                    complianceThreshold: Number(event.target.value || "0")
-                  }))
-                }
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="riskScoreThreshold">Risk score threshold</Label>
-              <Input
-                id="riskScoreThreshold"
-                type="number"
-                min={1}
-                max={100}
-                step={1}
-                value={settings.riskScoreThreshold}
-                onChange={(event) =>
-                  setSettings((prev) => ({
-                    ...prev,
-                    riskScoreThreshold: Number(event.target.value || "1")
-                  }))
-                }
-              />
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="failed-payouts">Failed payout threshold</Label>
+            <Input
+              id="failed-payouts"
+              type="number"
+              value={settings.thresholds.failedPayouts}
+              onChange={(event) => updateThreshold("failedPayouts", Number(event.target.value))}
+            />
           </div>
 
-          <Button type="submit" disabled={isSaving}>
-            {isSaving ? "Saving..." : "Save Alert Settings"}
+          <div className="space-y-2">
+            <Label htmlFor="compliance-flags">Compliance flag threshold</Label>
+            <Input
+              id="compliance-flags"
+              type="number"
+              value={settings.thresholds.complianceFlags}
+              onChange={(event) => updateThreshold("complianceFlags", Number(event.target.value))}
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <Button onClick={onSave} disabled={isPending}>
+            {isPending ? "Saving..." : "Save Alert Settings"}
           </Button>
-
-          {statusMessage ? <p className="text-sm text-emerald-400">{statusMessage}</p> : null}
-          {error ? <p className="text-sm text-red-400">{error}</p> : null}
-        </form>
+          {message ? <span className="text-sm text-[#8b949e]">{message}</span> : null}
+        </div>
       </CardContent>
     </Card>
   );

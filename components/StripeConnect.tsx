@@ -1,95 +1,161 @@
 "use client";
 
-import { useState } from "react";
-
+import { useState, useTransition } from "react";
+import { AlertCircle, CheckCircle2, KeyRound, LoaderCircle, PlugZap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { StripeAccountConnection } from "@/types/stripe-metrics";
+import type { MonitoringRun, StripeConnection } from "@/lib/types";
 
 interface StripeConnectProps {
-  existingAccount: StripeAccountConnection | null;
+  initialConnection: StripeConnection | null;
+  onRunComplete?: (run: MonitoringRun) => void;
 }
 
-export function StripeConnect({ existingAccount }: StripeConnectProps): React.JSX.Element {
-  const [accountId, setAccountId] = useState(existingAccount?.accountId ?? "self");
-  const [operatorEmail, setOperatorEmail] = useState(existingAccount?.operatorEmail ?? "");
-  const [isSaving, setIsSaving] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+export function StripeConnect({ initialConnection, onRunComplete }: StripeConnectProps) {
+  const [apiKey, setApiKey] = useState("");
+  const [connection, setConnection] = useState<StripeConnection | null>(initialConnection);
+  const [message, setMessage] = useState("");
+  const [isPending, startTransition] = useTransition();
 
-  async function handleConnect(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    setIsSaving(true);
-    setStatus(null);
-    setError(null);
-
-    try {
+  const connectStripe = () => {
+    startTransition(async () => {
+      setMessage("");
       const response = await fetch("/api/stripe/connect", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          accountId: accountId.trim() || "self",
-          operatorEmail: operatorEmail.trim() || null
-        })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey }),
       });
 
-      const data = (await response.json()) as { message?: string; error?: string };
+      const body = (await response.json()) as {
+        connection?: StripeConnection;
+        error?: string;
+        message?: string;
+      };
 
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to connect Stripe account");
+      if (!response.ok || !body.connection) {
+        setMessage(body.error ?? "Failed to connect Stripe.");
+        return;
       }
 
-      setStatus(data.message || "Stripe account connected");
-    } catch (requestError) {
-      setError((requestError as Error).message);
-    } finally {
-      setIsSaving(false);
-    }
-  }
+      setConnection(body.connection);
+      setApiKey("");
+      setMessage(body.message ?? "Stripe account connected.");
+    });
+  };
+
+  const disconnectStripe = () => {
+    startTransition(async () => {
+      setMessage("");
+      const response = await fetch("/api/stripe/connect", {
+        method: "DELETE",
+      });
+
+      const body = (await response.json()) as { message?: string; error?: string };
+
+      if (!response.ok) {
+        setMessage(body.error ?? "Failed to disconnect Stripe.");
+        return;
+      }
+
+      setConnection(null);
+      setMessage(body.message ?? "Stripe account disconnected.");
+    });
+  };
+
+  const runCheck = () => {
+    startTransition(async () => {
+      setMessage("");
+      const response = await fetch("/api/monitor", {
+        method: "POST",
+      });
+
+      const body = (await response.json()) as {
+        run?: MonitoringRun;
+        error?: string;
+      };
+
+      if (!response.ok || !body.run) {
+        setMessage(body.error ?? "Unable to run monitoring check.");
+        return;
+      }
+
+      onRunComplete?.(body.run);
+      setMessage(`Monitoring completed. Risk score ${body.run.risk.score}/100.`);
+    });
+  };
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Stripe Connection</CardTitle>
+        <CardTitle className="flex items-center gap-2">
+          <PlugZap className="h-5 w-5 text-[#58a6ff]" />
+          Stripe Connection
+        </CardTitle>
         <CardDescription>
-          Connect the Stripe account to monitor. Use <code>self</code> for your primary account.
+          Use a restricted Stripe secret key with read access to charges, disputes, payouts, and account data.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <form className="space-y-4" onSubmit={handleConnect}>
-          <div className="space-y-2">
-            <Label htmlFor="accountId">Stripe account ID</Label>
-            <Input
-              id="accountId"
-              value={accountId}
-              onChange={(event) => setAccountId(event.target.value)}
-              placeholder="acct_123... or self"
-              required
-            />
+      <CardContent className="space-y-4">
+        {connection ? (
+          <div className="rounded-lg border border-[#1f6feb]/40 bg-[#0d1117]/70 p-4 text-sm">
+            <p className="font-medium text-[#e6edf3]">Connected to {connection.accountName}</p>
+            <p className="mt-1 text-[#8b949e]">Account ID: {connection.accountId}</p>
+            <p className="text-[#8b949e]">
+              Mode: {connection.livemode ? "Live" : "Test"} · Connected {new Date(connection.connectedAt).toLocaleString()}
+            </p>
           </div>
-
+        ) : (
           <div className="space-y-2">
-            <Label htmlFor="operatorEmail">Alert owner email (optional)</Label>
+            <Label htmlFor="stripe-key">Stripe Secret Key</Label>
             <Input
-              id="operatorEmail"
-              type="email"
-              value={operatorEmail}
-              onChange={(event) => setOperatorEmail(event.target.value)}
-              placeholder="ops@yourcompany.com"
+              id="stripe-key"
+              type="password"
+              autoComplete="off"
+              placeholder="sk_live_..."
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
             />
+            <p className="text-xs text-[#8b949e]">
+              Recommended: create a restricted key with read-only permissions for risk monitoring.
+            </p>
           </div>
+        )}
 
-          <Button type="submit" disabled={isSaving}>
-            {isSaving ? "Verifying Stripe..." : "Save Stripe Connection"}
-          </Button>
+        <div className="flex flex-wrap gap-3">
+          {!connection ? (
+            <Button onClick={connectStripe} disabled={isPending || !apiKey}>
+              {isPending ? (
+                <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <KeyRound className="mr-2 h-4 w-4" />
+              )}
+              Connect Stripe
+            </Button>
+          ) : (
+            <>
+              <Button onClick={runCheck} disabled={isPending}>
+                {isPending ? <LoaderCircle className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Run Health Check Now
+              </Button>
+              <Button variant="secondary" onClick={disconnectStripe} disabled={isPending}>
+                Disconnect
+              </Button>
+            </>
+          )}
+        </div>
 
-          {status ? <p className="text-sm text-emerald-400">{status}</p> : null}
-          {error ? <p className="text-sm text-red-400">{error}</p> : null}
-        </form>
+        {message ? (
+          <p className="flex items-center gap-2 text-sm text-[#8b949e]">
+            {message.toLowerCase().includes("failed") || message.toLowerCase().includes("unable") ? (
+              <AlertCircle className="h-4 w-4 text-[#f85149]" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-[#3fb950]" />
+            )}
+            {message}
+          </p>
+        ) : null}
       </CardContent>
     </Card>
   );

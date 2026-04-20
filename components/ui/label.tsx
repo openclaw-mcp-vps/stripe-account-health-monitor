@@ -1,14 +1,11 @@
 import * as React from "react";
-
 import { cn } from "@/lib/utils";
 
-function Label({ className, ...props }: React.ComponentProps<"label">): React.JSX.Element {
+export function Label({ className, ...props }: React.LabelHTMLAttributes<HTMLLabelElement>) {
   return (
     <label
-      className={cn("text-sm font-medium leading-none text-zinc-200", className)}
+      className={cn("text-sm font-medium leading-none text-[#c9d1d9]", className)}
       {...props}
     />
   );
 }
-
-export { Label };
