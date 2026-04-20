@@ -1,104 +1,93 @@
-import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
-import { readState, updateState } from "@/lib/db";
-import { startMonitoringScheduler } from "@/lib/monitoring";
-import { validateStripeKey } from "@/lib/stripe";
-import type { StripeConnection } from "@/lib/types";
+import { z } from "zod";
+import { getOrCreateUser, markUserPaid, saveStripeConnection } from "@/lib/db";
+import { validateStripeSecretKey, verifyCheckoutSessionPaid } from "@/lib/stripe";
+import { applyPaidCookie, applySessionCookie, hasPaidCookie, resolveUserId } from "@/lib/session";
 
-export const runtime = "nodejs";
+const connectPayloadSchema = z.object({
+  secretKey: z
+    .string()
+    .min(20, "Stripe key looks too short.")
+    .regex(/^sk_(test|live)_/, "Use a Stripe secret key that starts with sk_test_ or sk_live_."),
+});
 
-async function requirePaidAccess() {
-  const cookieStore = await cookies();
-  return cookieStore.get("shm_paid")?.value === "1";
-}
+export async function GET(request: NextRequest) {
+  const { userId, isNew } = resolveUserId(request);
+  await getOrCreateUser(userId);
 
-export async function GET() {
-  const paid = await requirePaidAccess();
+  const sessionId = request.nextUrl.searchParams.get("session_id");
 
-  if (!paid) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const state = await readState();
-  const connection = state.stripeConnection
-    ? {
-        ...state.stripeConnection,
-        apiKey: `${state.stripeConnection.apiKey.slice(0, 8)}…`,
-      }
-    : null;
-  return NextResponse.json({ connection });
-}
-
-export async function POST(request: NextRequest) {
-  const paid = await requirePaidAccess();
-
-  if (!paid) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!sessionId) {
+    return NextResponse.redirect(new URL("/dashboard?unlock_error=missing_session", request.url));
   }
 
   try {
-    const payload = (await request.json()) as { apiKey?: string };
-    const apiKey = payload.apiKey?.trim();
+    const paidSession = await verifyCheckoutSessionPaid(sessionId);
 
-    if (!apiKey) {
-      return NextResponse.json({ error: "Stripe API key is required." }, { status: 400 });
+    if (!paidSession) {
+      return NextResponse.redirect(new URL("/dashboard?unlock_error=not_paid", request.url));
     }
 
-    if (!apiKey.startsWith("sk_")) {
-      return NextResponse.json(
-        { error: "Invalid Stripe key format. Expected a secret key starting with sk_." },
-        { status: 400 },
-      );
+    await markUserPaid(userId, paidSession.customerEmail);
+
+    const response = NextResponse.redirect(new URL("/dashboard?unlocked=1", request.url));
+    applyPaidCookie(response);
+
+    if (isNew) {
+      applySessionCookie(response, userId);
     }
 
-    const account = await validateStripeKey(apiKey);
-
-    const connection: StripeConnection = {
-      apiKey,
-      accountId: account.accountId,
-      accountName: account.accountName,
-      livemode: account.livemode,
-      connectedAt: new Date().toISOString(),
-    };
-
-    await updateState((current) => ({
-      ...current,
-      stripeConnection: connection,
-    }));
-
-    startMonitoringScheduler();
-
-    return NextResponse.json({
-      message: `Connected to ${connection.accountName}.`,
-      connection: {
-        ...connection,
-        apiKey: connection.apiKey.slice(0, 8) + "…",
-      },
-    });
+    return response;
   } catch (error) {
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Could not connect to Stripe. Check API key permissions and try again.",
-      },
-      { status: 400 },
-    );
+    console.error("Checkout verification failed", error);
+    return NextResponse.redirect(new URL("/dashboard?unlock_error=verification_failed", request.url));
   }
 }
 
-export async function DELETE() {
-  const paid = await requirePaidAccess();
+export async function POST(request: NextRequest) {
+  const { userId, isNew } = resolveUserId(request);
+  const user = await getOrCreateUser(userId);
 
-  if (!paid) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!(hasPaidCookie(request) || user.paid)) {
+    const deniedResponse = NextResponse.json(
+      { error: "Purchase required before connecting a Stripe account." },
+      { status: 403 },
+    );
+
+    if (isNew) {
+      applySessionCookie(deniedResponse, userId);
+    }
+
+    return deniedResponse;
   }
 
-  await updateState((current) => ({
-    ...current,
-    stripeConnection: null,
-  }));
+  try {
+    const payload = connectPayloadSchema.parse(await request.json());
+    const account = await validateStripeSecretKey(payload.secretKey);
 
-  return NextResponse.json({ message: "Stripe connection removed." });
+    await saveStripeConnection(userId, payload.secretKey, account.id, account.displayName);
+
+    const response = NextResponse.json({
+      ok: true,
+      account,
+    });
+
+    if (isNew) {
+      applySessionCookie(response, userId);
+    }
+
+    applyPaidCookie(response);
+    return response;
+  } catch (error) {
+    console.error("Stripe connection failed", error);
+
+    const message = error instanceof Error ? error.message : "Stripe connection failed.";
+    const response = NextResponse.json({ error: message }, { status: 400 });
+
+    if (isNew) {
+      applySessionCookie(response, userId);
+    }
+
+    return response;
+  }
 }

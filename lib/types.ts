@@ -1,76 +1,55 @@
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
-export interface HealthMetrics {
-  windowDays: number;
-  successfulCharges: number;
-  disputeCount: number;
-  openDisputes: number;
+export interface HealthSnapshot {
+  timestamp: string;
+  successfulChargesLast30Days: number;
+  disputesLast30Days: number;
+  disputeVelocity7d: number;
   chargebackRate: number;
-  refundCount: number;
-  refundRate: number;
-  failedPayouts: number;
-  blockedPayments: number;
-  complianceFlags: number;
-  timeline: Array<{
-    label: string;
-    disputes: number;
-    refunds: number;
-  }>;
-}
-
-export interface RiskAssessment {
-  level: RiskLevel;
-  score: number;
-  reasons: string[];
-  recommendations: string[];
-}
-
-export interface AlertThresholds {
-  chargebackRate: number;
-  disputeSpike: number;
-  failedPayouts: number;
-  complianceFlags: number;
+  refundRate30d: number;
+  failedPaymentRate7d: number;
+  complianceFlags: string[];
+  notes: string[];
+  riskScore: number;
+  riskLevel: RiskLevel;
 }
 
 export interface AlertSettings {
-  email: {
-    enabled: boolean;
-    to: string;
-  };
-  sms: {
-    enabled: boolean;
-    to: string;
-  };
-  thresholds: AlertThresholds;
+  emailEnabled: boolean;
+  smsEnabled: boolean;
+  emailTo: string;
+  phoneTo: string;
+  riskThreshold: number;
+  cooldownMinutes: number;
+  sendDailyDigest: boolean;
 }
 
-export interface StripeConnection {
-  accountId: string;
-  accountName: string;
-  livemode: boolean;
-  apiKey: string;
-  connectedAt: string;
-}
-
-export interface MonitoringRun {
+export interface UserAccount {
   id: string;
   createdAt: string;
-  trigger: string;
-  metrics: HealthMetrics;
-  risk: RiskAssessment;
-  alertsSent: string[];
-}
-
-export interface PaidCustomer {
-  email: string;
-  source: "lemonsqueezy_webhook" | "manual";
-  createdAt: string;
-}
-
-export interface AppState {
-  stripeConnection: StripeConnection | null;
+  updatedAt: string;
+  paid: boolean;
+  paidAt?: string;
+  email?: string;
+  stripeSecretKeyEncrypted?: string;
+  stripeAccountId?: string;
+  stripeDisplayName?: string;
   alertSettings: AlertSettings;
-  monitoringHistory: MonitoringRun[];
-  paidCustomers: PaidCustomer[];
-  pendingCheckoutEmails: string[];
+  lastSnapshot?: HealthSnapshot;
+  history: HealthSnapshot[];
+  lastAlertAt?: string;
+  lastAlertScore?: number;
+}
+
+export interface WebhookLog {
+  id: string;
+  receivedAt: string;
+  type: string;
+  livemode: boolean;
+  account?: string;
+}
+
+export interface AppStore {
+  users: Record<string, UserAccount>;
+  webhookLogs: WebhookLog[];
 }

@@ -1,183 +1,138 @@
-import crypto from "node:crypto";
 import cron from "node-cron";
-import { dispatchAlerts } from "@/lib/alerts";
-import { readState, updateState } from "@/lib/db";
-import { fetchAccountHealthMetrics } from "@/lib/stripe";
-import type {
-  AlertThresholds,
-  MonitoringRun,
-  RiskAssessment,
-  RiskLevel,
-} from "@/lib/types";
+import {
+  appendSnapshot,
+  getStripeSecretForUser,
+  getUser,
+  listUsers,
+  setUserLastAlert,
+} from "@/lib/db";
+import { sendRiskAlerts } from "@/lib/alerts";
+import { collectStripeMetrics } from "@/lib/stripe";
+import { HealthSnapshot, UserAccount } from "@/lib/types";
+import { riskLevelFromScore } from "@/lib/utils";
 
-declare global {
-  var __stripeMonitorCronStarted: boolean | undefined;
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-export function evaluateRisk(
-  metrics: MonitoringRun["metrics"],
-  thresholds: AlertThresholds,
-): RiskAssessment {
+function scoreFromMetrics(metrics: {
+  chargebackRate: number;
+  disputeVelocity7d: number;
+  refundRate30d: number;
+  failedPaymentRate7d: number;
+  complianceFlags: string[];
+}) {
   let score = 0;
-  const reasons: string[] = [];
-  const recommendations: string[] = [];
 
-  if (metrics.chargebackRate >= thresholds.chargebackRate) {
-    const multiplier = metrics.chargebackRate / thresholds.chargebackRate;
-    score += clamp(Math.round(26 * multiplier), 26, 42);
-    reasons.push(
-      `Chargeback rate is ${metrics.chargebackRate}% (threshold ${thresholds.chargebackRate}%).`,
-    );
-    recommendations.push(
-      "Review dispute evidence quality and issue proactive refunds on high-risk transactions.",
-    );
-  }
+  score += Math.min(metrics.chargebackRate * 4000, 45);
+  score += Math.min(metrics.disputeVelocity7d * 8, 24);
+  score += Math.min(metrics.refundRate30d * 180, 18);
+  score += Math.min(metrics.failedPaymentRate7d * 120, 12);
+  score += Math.min(metrics.complianceFlags.length * 8, 24);
 
-  if (metrics.openDisputes >= thresholds.disputeSpike) {
-    const overBy = metrics.openDisputes - thresholds.disputeSpike + 1;
-    score += clamp(overBy * 8, 10, 28);
-    reasons.push(
-      `Open disputes are elevated at ${metrics.openDisputes} (threshold ${thresholds.disputeSpike}).`,
-    );
-    recommendations.push(
-      "Respond to open disputes within 24 hours and route highest-value cases to manual review.",
-    );
-  }
-
-  if (metrics.failedPayouts >= thresholds.failedPayouts) {
-    score += clamp(metrics.failedPayouts * 16, 16, 35);
-    reasons.push(
-      `Failed payouts detected (${metrics.failedPayouts}) which can signal banking or compliance issues.`,
-    );
-    recommendations.push(
-      "Confirm payout bank details and investigate payout failure reasons in Stripe balance settings.",
-    );
-  }
-
-  if (metrics.complianceFlags >= thresholds.complianceFlags) {
-    score += clamp(metrics.complianceFlags * 12, 20, 36);
-    reasons.push(
-      `Compliance requirements outstanding (${metrics.complianceFlags}) with potential account restriction risk.`,
-    );
-    recommendations.push(
-      "Resolve Stripe account requirements and submit requested documents immediately.",
-    );
-  }
-
-  if (metrics.blockedPayments > 0) {
-    score += clamp(metrics.blockedPayments * 4, 6, 20);
-    reasons.push(
-      `${metrics.blockedPayments} blocked payments were observed, indicating elevated fraud or policy checks.`,
-    );
-    recommendations.push(
-      "Tighten fraud rules and align product descriptors with customer expectations to lower fraud signals.",
-    );
-  }
-
-  if (metrics.refundRate >= 8) {
-    score += 12;
-    reasons.push(`Refund rate is ${metrics.refundRate}%, indicating possible fulfillment or expectation mismatch.`);
-    recommendations.push("Improve checkout messaging and post-purchase communication to reduce avoidable refunds.");
-  }
-
-  score = clamp(score, 0, 100);
-
-  let level: RiskLevel = "low";
-  if (score >= 75) {
-    level = "critical";
-  } else if (score >= 50) {
-    level = "high";
-  } else if (score >= 25) {
-    level = "medium";
-  }
-
-  if (!reasons.length) {
-    reasons.push("All monitored indicators are within configured thresholds.");
-    recommendations.push("Keep monitoring active and review thresholds monthly as processing volume changes.");
-  }
-
-  return {
-    level,
-    score,
-    reasons,
-    recommendations,
-  };
+  return Math.min(Math.round(score), 100);
 }
 
-export async function runMonitoringCheck(trigger = "manual"): Promise<MonitoringRun> {
-  const state = await readState();
-
-  if (!state.stripeConnection) {
-    throw new Error("No Stripe account connected yet.");
-  }
-
-  const metrics = await fetchAccountHealthMetrics(state.stripeConnection);
-  const risk = evaluateRisk(metrics, state.alertSettings.thresholds);
-
-  let alertsSent: string[] = [];
-
-  if (risk.level === "high" || risk.level === "critical") {
-    alertsSent = await dispatchAlerts({
-      accountId: state.stripeConnection.accountId,
-      metrics,
-      risk,
-      settings: state.alertSettings,
-    });
-  }
-
-  const run: MonitoringRun = {
-    id: crypto.randomUUID(),
-    createdAt: new Date().toISOString(),
-    trigger,
-    metrics,
-    risk,
-    alertsSent,
-  };
-
-  await updateState((current) => {
-    const nextHistory = [...current.monitoringHistory, run].slice(-180);
-    return {
-      ...current,
-      monitoringHistory: nextHistory,
-    };
+function buildSnapshot(metrics: Awaited<ReturnType<typeof collectStripeMetrics>>): HealthSnapshot {
+  const riskScore = scoreFromMetrics({
+    chargebackRate: metrics.chargebackRate,
+    disputeVelocity7d: metrics.disputeVelocity7d,
+    refundRate30d: metrics.refundRate30d,
+    failedPaymentRate7d: metrics.failedPaymentRate7d,
+    complianceFlags: metrics.complianceFlags,
   });
 
-  return run;
-}
-
-export async function getDashboardData() {
-  const state = await readState();
-  const latestRun = state.monitoringHistory[state.monitoringHistory.length - 1] ?? null;
-
   return {
-    stripeConnection: state.stripeConnection,
-    alertSettings: state.alertSettings,
-    paidCustomers: state.paidCustomers,
-    latestRun,
-    history: state.monitoringHistory,
+    timestamp: new Date().toISOString(),
+    successfulChargesLast30Days: metrics.successfulChargesLast30Days,
+    disputesLast30Days: metrics.disputesLast30Days,
+    disputeVelocity7d: metrics.disputeVelocity7d,
+    chargebackRate: metrics.chargebackRate,
+    refundRate30d: metrics.refundRate30d,
+    failedPaymentRate7d: metrics.failedPaymentRate7d,
+    complianceFlags: metrics.complianceFlags,
+    notes: metrics.notes,
+    riskScore,
+    riskLevel: riskLevelFromScore(riskScore),
   };
 }
 
-export function startMonitoringScheduler() {
-  if (globalThis.__stripeMonitorCronStarted) {
+function shouldSendAlert(user: UserAccount, snapshot: HealthSnapshot) {
+  if (snapshot.riskScore < user.alertSettings.riskThreshold) {
+    return false;
+  }
+
+  if (!user.lastAlertAt) {
+    return true;
+  }
+
+  const cooldownMs = user.alertSettings.cooldownMinutes * 60_000;
+  const elapsed = Date.now() - new Date(user.lastAlertAt).getTime();
+
+  if (elapsed < cooldownMs) {
+    return false;
+  }
+
+  if (typeof user.lastAlertScore === "number" && snapshot.riskScore <= user.lastAlertScore) {
+    return false;
+  }
+
+  return true;
+}
+
+export async function runHealthCheckForUser(userId: string) {
+  const user = await getUser(userId);
+  const secretKey = await getStripeSecretForUser(user.id);
+
+  if (!secretKey) {
+    throw new Error("Connect a Stripe secret key before running monitoring.");
+  }
+
+  const metrics = await collectStripeMetrics(secretKey);
+  const snapshot = buildSnapshot(metrics);
+  const updatedUser = await appendSnapshot(user.id, snapshot);
+
+  if (shouldSendAlert(updatedUser, snapshot)) {
+    await sendRiskAlerts(updatedUser, snapshot);
+    await setUserLastAlert(updatedUser.id, snapshot.riskScore);
+  }
+
+  return {
+    snapshot,
+    accountId: metrics.accountId,
+    accountLabel: metrics.accountLabel,
+  };
+}
+
+export async function runMonitoringSweep() {
+  const users = await listUsers();
+  const targets = users.filter((user) => user.paid && user.stripeSecretKeyEncrypted);
+
+  const results = await Promise.allSettled(
+    targets.map(async (user) => {
+      const result = await runHealthCheckForUser(user.id);
+      return {
+        userId: user.id,
+        riskScore: result.snapshot.riskScore,
+      };
+    }),
+  );
+
+  return results;
+}
+
+export function startMonitoringCron() {
+  const globalState = globalThis as unknown as {
+    __sahmCronStarted?: boolean;
+  };
+
+  if (globalState.__sahmCronStarted) {
     return;
   }
 
-  cron.schedule("*/15 * * * *", async () => {
+  cron.schedule("*/30 * * * *", async () => {
     try {
-      const state = await readState();
-      if (!state.stripeConnection) {
-        return;
-      }
-      await runMonitoringCheck("scheduler");
+      await runMonitoringSweep();
     } catch (error) {
-      console.error("Scheduled monitoring run failed", error);
+      console.error("Monitoring sweep failed", error);
     }
   });
 
-  globalThis.__stripeMonitorCronStarted = true;
+  globalState.__sahmCronStarted = true;
 }

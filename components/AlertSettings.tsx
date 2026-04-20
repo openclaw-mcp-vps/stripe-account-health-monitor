@@ -1,168 +1,190 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
+import { BellRing, Loader2 } from "lucide-react";
+import { AlertSettings as AlertSettingsType } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { AlertSettings as AlertSettingsType } from "@/lib/types";
+import { Switch } from "@/components/ui/switch";
+
+const formSchema = z.object({
+  emailEnabled: z.boolean(),
+  smsEnabled: z.boolean(),
+  emailTo: z.string().email("Enter a valid email address."),
+  phoneTo: z.string().min(7, "Use international format, for example +14155550123.").or(z.literal("")),
+  riskThreshold: z.coerce.number().min(10).max(100),
+  cooldownMinutes: z.coerce.number().min(15).max(1440),
+  sendDailyDigest: z.boolean(),
+});
+
+type FormValues = z.infer<typeof formSchema>;
 
 interface AlertSettingsProps {
   initialSettings: AlertSettingsType;
+  deliveryReadiness: {
+    smtpReady: boolean;
+    twilioReady: boolean;
+  };
+  onSaved: (settings: AlertSettingsType) => void;
 }
 
-export function AlertSettings({ initialSettings }: AlertSettingsProps) {
-  const [settings, setSettings] = useState<AlertSettingsType>(initialSettings);
-  const [message, setMessage] = useState<string>("");
-  const [isPending, startTransition] = useTransition();
+export function AlertSettings({ initialSettings, deliveryReadiness, onSaved }: AlertSettingsProps) {
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
 
-  const update = (
-    path: "email.enabled" | "sms.enabled" | "email.to" | "sms.to",
-    value: string | boolean,
-  ) => {
-    setSettings((current) => {
-      const next = structuredClone(current);
-      if (path === "email.enabled") next.email.enabled = Boolean(value);
-      if (path === "sms.enabled") next.sms.enabled = Boolean(value);
-      if (path === "email.to") next.email.to = String(value);
-      if (path === "sms.to") next.sms.to = String(value);
-      return next;
-    });
-  };
+  const {
+    register,
+    setValue,
+    watch,
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<FormValues>({
+    resolver: zodResolver(formSchema),
+    defaultValues: initialSettings,
+  });
 
-  const updateThreshold = (
-    key: keyof AlertSettingsType["thresholds"],
-    value: number,
-  ) => {
-    setSettings((current) => ({
-      ...current,
-      thresholds: {
-        ...current.thresholds,
-        [key]: Number.isFinite(value) ? value : 0,
-      },
-    }));
-  };
+  const emailEnabled = watch("emailEnabled");
+  const smsEnabled = watch("smsEnabled");
 
-  const onSave = () => {
-    startTransition(async () => {
-      setMessage("");
+  async function onSubmit(values: FormValues) {
+    setSaveError(null);
+    setSaveSuccess(null);
+
+    try {
       const response = await fetch("/api/alerts", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "update-settings",
-          settings,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(values),
       });
 
-      const body = (await response.json()) as { error?: string; message?: string };
-      if (!response.ok) {
-        setMessage(body.error ?? "Failed to save alert settings.");
-        return;
+      const payload = (await response.json()) as {
+        error?: string;
+        settings?: AlertSettingsType;
+      };
+
+      if (!response.ok || !payload.settings) {
+        throw new Error(payload.error || "Could not save alert settings.");
       }
 
-      setMessage(body.message ?? "Alert settings saved.");
-    });
-  };
+      onSaved(payload.settings);
+      setSaveSuccess("Alert settings saved.");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Could not save alert settings.");
+    }
+  }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Alert Configuration</CardTitle>
+        <CardTitle className="flex items-center gap-2">
+          <BellRing className="h-5 w-5 text-[#4fb8ff]" /> Alert Settings
+        </CardTitle>
         <CardDescription>
-          Configure where risk alerts should be sent and tune thresholds to your tolerance.
+          Define when to alert and where to send notifications. Alerts fire only when risk rises above
+          your threshold.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-6">
-        <div className="grid gap-3 md:grid-cols-2">
-          <div className="space-y-2 rounded-lg border border-[#2f3b4a] bg-[#0d1117]/60 p-4">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="email-enabled">Email alerts</Label>
-              <input
-                id="email-enabled"
-                type="checkbox"
-                checked={settings.email.enabled}
-                onChange={(event) => update("email.enabled", event.target.checked)}
-                className="h-4 w-4 accent-[#3fb950]"
+      <CardContent>
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between rounded-lg border border-[#243244] p-3">
+                <Label htmlFor="emailEnabled">Email Alerts</Label>
+                <Switch
+                  id="emailEnabled"
+                  checked={emailEnabled}
+                  onCheckedChange={(checked) => setValue("emailEnabled", checked)}
+                />
+              </div>
+              <Input
+                type="email"
+                placeholder="ops@company.com"
+                {...register("emailTo")}
+                disabled={!emailEnabled}
               />
+              {errors.emailTo ? <p className="text-xs text-[#ff8b9a]">{errors.emailTo.message}</p> : null}
+              {!deliveryReadiness.smtpReady ? (
+                <p className="text-xs text-[#f7b955]">SMTP credentials missing. Email delivery is offline.</p>
+              ) : null}
             </div>
-            <Input
-              placeholder="ops@yourcompany.com"
-              value={settings.email.to}
-              onChange={(event) => update("email.to", event.target.value)}
-            />
-          </div>
 
-          <div className="space-y-2 rounded-lg border border-[#2f3b4a] bg-[#0d1117]/60 p-4">
-            <div className="flex items-center justify-between">
-              <Label htmlFor="sms-enabled">SMS alerts</Label>
-              <input
-                id="sms-enabled"
-                type="checkbox"
-                checked={settings.sms.enabled}
-                onChange={(event) => update("sms.enabled", event.target.checked)}
-                className="h-4 w-4 accent-[#58a6ff]"
+            <div className="space-y-2">
+              <div className="flex items-center justify-between rounded-lg border border-[#243244] p-3">
+                <Label htmlFor="smsEnabled">SMS Alerts</Label>
+                <Switch
+                  id="smsEnabled"
+                  checked={smsEnabled}
+                  onCheckedChange={(checked) => setValue("smsEnabled", checked)}
+                />
+              </div>
+              <Input
+                type="text"
+                placeholder="+14155550123"
+                {...register("phoneTo")}
+                disabled={!smsEnabled}
               />
+              {errors.phoneTo ? <p className="text-xs text-[#ff8b9a]">{errors.phoneTo.message}</p> : null}
+              {!deliveryReadiness.twilioReady ? (
+                <p className="text-xs text-[#f7b955]">Twilio credentials missing. SMS delivery is offline.</p>
+              ) : null}
             </div>
-            <Input
-              placeholder="+14155551234"
-              value={settings.sms.to}
-              onChange={(event) => update("sms.to", event.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="chargeback-threshold">Chargeback rate threshold (%)</Label>
-            <Input
-              id="chargeback-threshold"
-              type="number"
-              step="0.01"
-              value={settings.thresholds.chargebackRate}
-              onChange={(event) =>
-                updateThreshold("chargebackRate", Number(event.target.value))
-              }
-            />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="dispute-spike">Open dispute spike threshold</Label>
-            <Input
-              id="dispute-spike"
-              type="number"
-              value={settings.thresholds.disputeSpike}
-              onChange={(event) => updateThreshold("disputeSpike", Number(event.target.value))}
-            />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="riskThreshold">Risk Threshold (0-100)</Label>
+              <Input id="riskThreshold" type="number" min={10} max={100} {...register("riskThreshold")} />
+              {errors.riskThreshold ? (
+                <p className="text-xs text-[#ff8b9a]">{errors.riskThreshold.message}</p>
+              ) : null}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cooldownMinutes">Cooldown Minutes</Label>
+              <Input
+                id="cooldownMinutes"
+                type="number"
+                min={15}
+                max={1440}
+                {...register("cooldownMinutes")}
+              />
+              {errors.cooldownMinutes ? (
+                <p className="text-xs text-[#ff8b9a]">{errors.cooldownMinutes.message}</p>
+              ) : null}
+            </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="failed-payouts">Failed payout threshold</Label>
-            <Input
-              id="failed-payouts"
-              type="number"
-              value={settings.thresholds.failedPayouts}
-              onChange={(event) => updateThreshold("failedPayouts", Number(event.target.value))}
+          <div className="flex items-center justify-between rounded-lg border border-[#243244] p-3">
+            <div>
+              <Label htmlFor="sendDailyDigest">Daily Digest</Label>
+              <p className="text-xs text-[#7d8590]">Send a once-daily summary even if risk stays stable.</p>
+            </div>
+            <Switch
+              id="sendDailyDigest"
+              checked={watch("sendDailyDigest")}
+              onCheckedChange={(checked) => setValue("sendDailyDigest", checked)}
             />
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="compliance-flags">Compliance flag threshold</Label>
-            <Input
-              id="compliance-flags"
-              type="number"
-              value={settings.thresholds.complianceFlags}
-              onChange={(event) => updateThreshold("complianceFlags", Number(event.target.value))}
-            />
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          <Button onClick={onSave} disabled={isPending}>
-            {isPending ? "Saving..." : "Save Alert Settings"}
+          <Button type="submit" disabled={isSubmitting}>
+            {isSubmitting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> Saving
+              </>
+            ) : (
+              "Save Alert Settings"
+            )}
           </Button>
-          {message ? <span className="text-sm text-[#8b949e]">{message}</span> : null}
-        </div>
+
+          {saveError ? <p className="text-sm text-[#ff8b9a]">{saveError}</p> : null}
+          {saveSuccess ? <p className="text-sm text-[#a7f3d0]">{saveSuccess}</p> : null}
+        </form>
       </CardContent>
     </Card>
   );

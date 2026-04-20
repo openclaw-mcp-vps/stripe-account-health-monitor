@@ -1,49 +1,82 @@
-import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
-import { runMonitoringCheck, startMonitoringScheduler } from "@/lib/monitoring";
+import { getOrCreateUser } from "@/lib/db";
+import { runHealthCheckForUser, startMonitoringCron } from "@/lib/monitoring";
+import { applyPaidCookie, applySessionCookie, hasPaidCookie, resolveUserId } from "@/lib/session";
 
-export const runtime = "nodejs";
+const STALE_MINUTES = 30;
 
-function isAuthorized(request: NextRequest, paidCookie: string | undefined) {
-  if (paidCookie === "1") {
-    return true;
-  }
-
-  const token = request.headers.get("x-monitor-token");
-  return Boolean(token && process.env.MONITOR_CRON_SECRET && token === process.env.MONITOR_CRON_SECRET);
+function isSnapshotStale(timestamp?: string) {
+  if (!timestamp) return true;
+  const ageMs = Date.now() - new Date(timestamp).getTime();
+  return ageMs > STALE_MINUTES * 60_000;
 }
 
-async function executeMonitoring(request: NextRequest, trigger: string) {
-  const cookieStore = await cookies();
-  const paidCookie = cookieStore.get("shm_paid")?.value;
+async function handleMonitorRequest(request: NextRequest, forceRefresh: boolean) {
+  startMonitoringCron();
 
-  if (!isAuthorized(request, paidCookie)) {
-    return NextResponse.json(
-      {
-        error: "Unauthorized",
-      },
-      { status: 401 },
-    );
+  const { userId, isNew } = resolveUserId(request);
+  const user = await getOrCreateUser(userId);
+
+  if (!(hasPaidCookie(request) || user.paid)) {
+    const denied = NextResponse.json({ error: "Subscription required." }, { status: 402 });
+    if (isNew) applySessionCookie(denied, userId);
+    return denied;
+  }
+
+  if (!user.stripeSecretKeyEncrypted) {
+    const response = NextResponse.json({
+      connected: false,
+      history: user.history,
+    });
+
+    if (isNew) applySessionCookie(response, userId);
+    applyPaidCookie(response);
+    return response;
   }
 
   try {
-    startMonitoringScheduler();
-    const run = await runMonitoringCheck(trigger);
-    return NextResponse.json({ run });
+    let snapshot = user.lastSnapshot;
+    const needsRefresh = forceRefresh || isSnapshotStale(snapshot?.timestamp);
+
+    if (needsRefresh) {
+      const result = await runHealthCheckForUser(userId);
+      snapshot = result.snapshot;
+    }
+
+    const freshUser = await getOrCreateUser(userId);
+
+    const response = NextResponse.json({
+      connected: true,
+      accountLabel: freshUser.stripeDisplayName,
+      snapshot: freshUser.lastSnapshot,
+      history: freshUser.history,
+    });
+
+    if (isNew) applySessionCookie(response, userId);
+    applyPaidCookie(response);
+
+    return response;
   } catch (error) {
-    return NextResponse.json(
+    console.error("Monitoring route failed", error);
+
+    const response = NextResponse.json(
       {
-        error: error instanceof Error ? error.message : "Monitoring failed.",
+        error: error instanceof Error ? error.message : "Monitoring run failed.",
       },
-      { status: 400 },
+      { status: 500 },
     );
+
+    if (isNew) applySessionCookie(response, userId);
+    applyPaidCookie(response);
+    return response;
   }
 }
 
 export async function GET(request: NextRequest) {
-  return executeMonitoring(request, "manual:get");
+  const forceRefresh = request.nextUrl.searchParams.get("refresh") === "1";
+  return handleMonitorRequest(request, forceRefresh);
 }
 
 export async function POST(request: NextRequest) {
-  return executeMonitoring(request, "manual:post");
+  return handleMonitorRequest(request, true);
 }

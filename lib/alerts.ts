@@ -1,129 +1,112 @@
-import crypto from "node:crypto";
 import nodemailer from "nodemailer";
 import twilio from "twilio";
-import type { AlertSettings, HealthMetrics, RiskAssessment } from "@/lib/types";
+import { HealthSnapshot, UserAccount } from "@/lib/types";
 
-interface DispatchPayload {
-  accountId: string;
-  metrics: HealthMetrics;
-  risk: RiskAssessment;
-  settings: AlertSettings;
+function isSmtpConfigured() {
+  return Boolean(
+    process.env.SMTP_HOST &&
+      process.env.SMTP_PORT &&
+      process.env.SMTP_USER &&
+      process.env.SMTP_PASS &&
+      process.env.ALERT_FROM_EMAIL,
+  );
 }
 
-function buildMessage(payload: DispatchPayload) {
-  const subject = `[Stripe Risk ${payload.risk.level.toUpperCase()}] ${payload.accountId}`;
-  const reasonText = payload.risk.reasons.length
-    ? payload.risk.reasons.map((item) => `- ${item}`).join("\n")
-    : "- Risk score crossed alert threshold.";
-
-  const recommendationText = payload.risk.recommendations.length
-    ? payload.risk.recommendations.map((item) => `- ${item}`).join("\n")
-    : "- Review Stripe dashboard and resolve outstanding account requirements.";
-
-  const body = `Stripe Account Health Alert\n\nAccount: ${payload.accountId}\nRisk score: ${payload.risk.score}/100\nRisk level: ${payload.risk.level}\nLookback window: ${payload.metrics.windowDays} days\n\nKey metrics:\n- Chargeback rate: ${payload.metrics.chargebackRate}%\n- Disputes: ${payload.metrics.disputeCount} (${payload.metrics.openDisputes} open)\n- Failed payouts: ${payload.metrics.failedPayouts}\n- Compliance flags: ${payload.metrics.complianceFlags}\n\nTriggered reasons:\n${reasonText}\n\nRecommended actions:\n${recommendationText}`;
-
-  return { subject, body };
+function isTwilioConfigured() {
+  return Boolean(
+    process.env.TWILIO_ACCOUNT_SID &&
+      process.env.TWILIO_AUTH_TOKEN &&
+      process.env.TWILIO_FROM_NUMBER,
+  );
 }
 
-async function sendEmailAlert(
-  to: string,
-  subject: string,
-  body: string,
-): Promise<boolean> {
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT ?? "587");
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  const from = process.env.ALERT_FROM_EMAIL ?? "alerts@stripe-health.local";
+function getRiskHeadline(score: number) {
+  if (score >= 80) return "Critical Stripe Risk";
+  if (score >= 60) return "High Stripe Risk";
+  if (score >= 35) return "Moderate Stripe Risk";
+  return "Stripe Risk Update";
+}
 
-  if (!host || !user || !pass || !to) {
-    return false;
+function renderSummary(user: UserAccount, snapshot: HealthSnapshot) {
+  const lines = [
+    `${getRiskHeadline(snapshot.riskScore)} for ${user.stripeDisplayName || "your account"}`,
+    `Risk score: ${snapshot.riskScore}/100 (${snapshot.riskLevel.toUpperCase()})`,
+    `Chargeback rate (30d): ${(snapshot.chargebackRate * 100).toFixed(2)}%`,
+    `Disputes (30d): ${snapshot.disputesLast30Days}`,
+    `Refund rate (30d): ${(snapshot.refundRate30d * 100).toFixed(2)}%`,
+    `Failed payment rate (7d): ${(snapshot.failedPaymentRate7d * 100).toFixed(2)}%`,
+  ];
+
+  if (snapshot.complianceFlags.length > 0) {
+    lines.push(`Compliance flags: ${snapshot.complianceFlags.join(", ")}`);
+  }
+
+  if (snapshot.notes.length > 0) {
+    lines.push("Notes:");
+    snapshot.notes.forEach((note) => lines.push(`- ${note}`));
+  }
+
+  return lines.join("\n");
+}
+
+async function sendEmailAlert(to: string, subject: string, content: string) {
+  if (!isSmtpConfigured()) {
+    console.warn("SMTP credentials are missing; email alert skipped.");
+    return;
   }
 
   const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT),
+    secure: Number(process.env.SMTP_PORT) === 465,
     auth: {
-      user,
-      pass,
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
     },
   });
 
   await transporter.sendMail({
-    from,
+    from: process.env.ALERT_FROM_EMAIL,
     to,
     subject,
-    text: body,
+    text: content,
   });
-
-  return true;
 }
 
-async function sendSmsAlert(to: string, body: string): Promise<boolean> {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const from = process.env.TWILIO_FROM_NUMBER;
-
-  if (!accountSid || !authToken || !from || !to) {
-    return false;
+async function sendSmsAlert(to: string, content: string) {
+  if (!isTwilioConfigured()) {
+    console.warn("Twilio credentials are missing; SMS alert skipped.");
+    return;
   }
 
-  const client = twilio(accountSid, authToken);
-
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   await client.messages.create({
-    body,
-    from,
     to,
+    from: process.env.TWILIO_FROM_NUMBER,
+    body: content.slice(0, 1400),
   });
-
-  return true;
 }
 
-export async function dispatchAlerts(payload: DispatchPayload): Promise<string[]> {
-  const sentChannels: string[] = [];
-  const { subject, body } = buildMessage(payload);
-
-  if (payload.settings.email.enabled && payload.settings.email.to) {
-    try {
-      const sent = await sendEmailAlert(payload.settings.email.to, subject, body);
-      if (sent) {
-        sentChannels.push("email");
-      }
-    } catch (error) {
-      console.error("Failed to send email alert", error);
-    }
-  }
-
-  if (payload.settings.sms.enabled && payload.settings.sms.to) {
-    try {
-      const sent = await sendSmsAlert(payload.settings.sms.to, `${subject}\n${body}`);
-      if (sent) {
-        sentChannels.push("sms");
-      }
-    } catch (error) {
-      console.error("Failed to send SMS alert", error);
-    }
-  }
-
-  return sentChannels;
+export function getDeliveryReadiness() {
+  return {
+    smtpReady: isSmtpConfigured(),
+    twilioReady: isTwilioConfigured(),
+  };
 }
 
-export function verifyLemonSignature(rawBody: string, signature: string | null): boolean {
-  const secret = process.env.LEMON_SQUEEZY_WEBHOOK_SECRET;
+export async function sendRiskAlerts(user: UserAccount, snapshot: HealthSnapshot) {
+  const subject = `${getRiskHeadline(snapshot.riskScore)} - ${user.stripeDisplayName || "Stripe Account"}`;
+  const content = renderSummary(user, snapshot);
 
-  if (!secret || !signature) {
-    return false;
+  const jobs: Promise<unknown>[] = [];
+
+  if (user.alertSettings.emailEnabled && user.alertSettings.emailTo) {
+    jobs.push(sendEmailAlert(user.alertSettings.emailTo, subject, content));
   }
 
-  const digest = crypto.createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
-
-  const a = Buffer.from(digest, "utf8");
-  const b = Buffer.from(signature, "utf8");
-
-  if (a.length !== b.length) {
-    return false;
+  if (user.alertSettings.smsEnabled && user.alertSettings.phoneTo) {
+    jobs.push(sendSmsAlert(user.alertSettings.phoneTo, content));
   }
 
-  return crypto.timingSafeEqual(a, b);
+  await Promise.all(jobs);
 }

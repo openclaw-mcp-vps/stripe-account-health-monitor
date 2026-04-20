@@ -1,167 +1,152 @@
 import Stripe from "stripe";
-import type { HealthMetrics, StripeConnection } from "@/lib/types";
 
-const STRIPE_API_VERSION = "2025-08-27.basil";
+const APP_INFO = {
+  name: "Stripe Account Health Monitor",
+  version: "1.0.0",
+};
 
-function buildStripeClient(apiKey: string) {
-  return new Stripe(apiKey, {
-    apiVersion: STRIPE_API_VERSION,
-    appInfo: {
-      name: "stripe-account-health-monitor",
-      version: "1.0.0",
-    },
+function createClient(secretKey: string) {
+  return new Stripe(secretKey, {
+    appInfo: APP_INFO,
   });
 }
 
-export function getStripeClient(apiKey?: string) {
-  const resolvedKey = apiKey ?? process.env.STRIPE_SECRET_KEY;
+export interface StripeRiskMetrics {
+  accountId: string;
+  accountLabel: string;
+  successfulChargesLast30Days: number;
+  disputesLast30Days: number;
+  disputeVelocity7d: number;
+  chargebackRate: number;
+  refundRate30d: number;
+  failedPaymentRate7d: number;
+  complianceFlags: string[];
+  notes: string[];
+}
 
-  if (!resolvedKey) {
-    throw new Error(
-      "No Stripe API key configured. Connect an account in the dashboard or set STRIPE_SECRET_KEY.",
+export async function validateStripeSecretKey(secretKey: string) {
+  const client = createClient(secretKey);
+  const account = await client.accounts.retrieve();
+
+  return {
+    id: account.id,
+    displayName:
+      account.settings?.dashboard?.display_name ||
+      account.business_profile?.name ||
+      account.email ||
+      account.id,
+  };
+}
+
+export async function collectStripeMetrics(secretKey: string): Promise<StripeRiskMetrics> {
+  const stripe = createClient(secretKey);
+  const now = Math.floor(Date.now() / 1000);
+  const days30 = now - 60 * 60 * 24 * 30;
+  const days7 = now - 60 * 60 * 24 * 7;
+
+  const [account, disputes30d, disputes7d, charges30d, intents7d] = await Promise.all([
+    stripe.accounts.retrieve(),
+    stripe.disputes.list({ created: { gte: days30 }, limit: 100 }),
+    stripe.disputes.list({ created: { gte: days7 }, limit: 100 }),
+    stripe.charges.list({ created: { gte: days30 }, limit: 100 }),
+    stripe.paymentIntents.list({ created: { gte: days7 }, limit: 100 }),
+  ]);
+
+  const successfulCharges = charges30d.data.filter((charge) => charge.paid && charge.status === "succeeded");
+  const refundedCharges = successfulCharges.filter((charge) => charge.refunded || charge.amount_refunded > 0);
+
+  const failedIntents = intents7d.data.filter(
+    (intent) => intent.status === "canceled" || intent.status === "requires_payment_method",
+  );
+
+  const successfulChargeCount = successfulCharges.length;
+  const disputesCount30d = disputes30d.data.length;
+  const chargebackRate = successfulChargeCount > 0 ? disputesCount30d / successfulChargeCount : 0;
+  const refundRate = successfulChargeCount > 0 ? refundedCharges.length / successfulChargeCount : 0;
+  const failedPaymentRate = intents7d.data.length > 0 ? failedIntents.length / intents7d.data.length : 0;
+
+  const complianceFlags: string[] = [];
+  const notes: string[] = [];
+
+  if (account.charges_enabled === false) {
+    complianceFlags.push("charges_disabled");
+    notes.push("Stripe has disabled charges on the connected account.");
+  }
+
+  if (account.payouts_enabled === false) {
+    complianceFlags.push("payouts_disabled");
+    notes.push("Payouts are currently disabled. This can precede account restrictions.");
+  }
+
+  if ((account.requirements?.currently_due?.length ?? 0) > 0) {
+    complianceFlags.push("verification_fields_due");
+    notes.push(
+      `Stripe still requires ${account.requirements?.currently_due?.length ?? 0} verification field(s).`,
     );
   }
 
-  return buildStripeClient(resolvedKey);
-}
+  if ((account.requirements?.past_due?.length ?? 0) > 0) {
+    complianceFlags.push("verification_past_due");
+    notes.push(
+      `There are ${account.requirements?.past_due?.length ?? 0} past-due verification requirement(s).`,
+    );
+  }
 
-export async function validateStripeKey(apiKey: string): Promise<{
-  accountId: string;
-  accountName: string;
-  livemode: boolean;
-}> {
-  const stripe = getStripeClient(apiKey);
-  const account = await stripe.accounts.retrieve();
+  if (chargebackRate >= 0.009) {
+    notes.push("Chargeback rate is in a range where Stripe may apply reserves or restrictions.");
+  }
 
-  const accountName =
-    account.business_profile?.name ||
-    account.settings?.dashboard?.display_name ||
-    account.email ||
-    "Stripe Account";
+  if (refundRate >= 0.12) {
+    notes.push("Refund rate is elevated and can trigger risk-team review.");
+  }
+
+  if (failedPaymentRate >= 0.12) {
+    notes.push("Failed payment attempts are unusually high over the last 7 days.");
+  }
 
   return {
     accountId: account.id,
-    accountName,
-    livemode: apiKey.startsWith("sk_live_"),
+    accountLabel:
+      account.settings?.dashboard?.display_name ||
+      account.business_profile?.name ||
+      account.email ||
+      account.id,
+    successfulChargesLast30Days: successfulChargeCount,
+    disputesLast30Days: disputesCount30d,
+    disputeVelocity7d: disputes7d.data.length,
+    chargebackRate,
+    refundRate30d: refundRate,
+    failedPaymentRate7d: failedPaymentRate,
+    complianceFlags,
+    notes,
   };
 }
 
-function emptyTimeline(days = 7) {
-  const now = new Date();
-  const points = [] as Array<{ label: string; disputes: number; refunds: number }>;
-
-  for (let offset = days - 1; offset >= 0; offset -= 1) {
-    const date = new Date(now);
-    date.setUTCDate(now.getUTCDate() - offset);
-    points.push({
-      label: `${date.toLocaleString("en-US", {
-        month: "short",
-        day: "numeric",
-        timeZone: "UTC",
-      })}`,
-      disputes: 0,
-      refunds: 0,
-    });
+function getPlatformStripeClient(): Stripe {
+  const secretKey = process.env.STRIPE_SECRET_KEY;
+  if (!secretKey) {
+    throw new Error("STRIPE_SECRET_KEY is required for purchase verification and webhook handling.");
   }
 
-  return points;
+  return createClient(secretKey);
 }
 
-function addTimelineValue(
-  timeline: Array<{ label: string; disputes: number; refunds: number }>,
-  createdUnix: number,
-  key: "disputes" | "refunds",
-) {
-  const label = new Date(createdUnix * 1000).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
-  const point = timeline.find((item) => item.label === label);
+export async function verifyCheckoutSessionPaid(sessionId: string) {
+  const stripe = getPlatformStripeClient();
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-  if (point) {
-    point[key] += 1;
+  if (session.payment_status !== "paid") {
+    return null;
   }
-}
-
-export async function fetchAccountHealthMetrics(
-  stripeConnection: StripeConnection,
-  lookbackDays = 30,
-): Promise<HealthMetrics> {
-  const stripe = getStripeClient(stripeConnection.apiKey);
-  const nowInSeconds = Math.floor(Date.now() / 1000);
-  const fromTimestamp = nowInSeconds - lookbackDays * 24 * 60 * 60;
-
-  let successfulCharges = 0;
-  let refundCount = 0;
-  let blockedPayments = 0;
-  let disputeCount = 0;
-  let openDisputes = 0;
-  let failedPayouts = 0;
-  let complianceFlags = 0;
-
-  const timeline = emptyTimeline(7);
-
-  for await (const charge of stripe.charges.list({
-    created: { gte: fromTimestamp },
-    limit: 100,
-  })) {
-    if (charge.paid && charge.status === "succeeded") {
-      successfulCharges += 1;
-    }
-
-    if (charge.refunded || charge.amount_refunded > 0) {
-      refundCount += 1;
-      addTimelineValue(timeline, charge.created, "refunds");
-    }
-
-    if (charge.outcome?.type === "blocked") {
-      blockedPayments += 1;
-    }
-  }
-
-  for await (const dispute of stripe.disputes.list({
-    created: { gte: fromTimestamp },
-    limit: 100,
-  })) {
-    disputeCount += 1;
-    addTimelineValue(timeline, dispute.created, "disputes");
-
-    if (!["won", "lost"].includes(dispute.status)) {
-      openDisputes += 1;
-    }
-  }
-
-  for await (const payout of stripe.payouts.list({
-    created: { gte: fromTimestamp },
-    limit: 100,
-  })) {
-    if (payout.status === "failed") {
-      failedPayouts += 1;
-    }
-  }
-
-  const account = await stripe.accounts.retrieve();
-  const currentlyDue = account.requirements?.currently_due?.length ?? 0;
-  const pastDue = account.requirements?.past_due?.length ?? 0;
-  const disabledReason = account.requirements?.disabled_reason ? 1 : 0;
-  complianceFlags = currentlyDue + pastDue + disabledReason;
-
-  const chargebackRate =
-    successfulCharges > 0 ? (disputeCount / successfulCharges) * 100 : 0;
-  const refundRate = successfulCharges > 0 ? (refundCount / successfulCharges) * 100 : 0;
 
   return {
-    windowDays: lookbackDays,
-    successfulCharges,
-    disputeCount,
-    openDisputes,
-    chargebackRate: Number(chargebackRate.toFixed(2)),
-    refundCount,
-    refundRate: Number(refundRate.toFixed(2)),
-    failedPayouts,
-    blockedPayments,
-    complianceFlags,
-    timeline,
+    id: session.id,
+    customerEmail: session.customer_details?.email || undefined,
+    amountTotal: session.amount_total ?? undefined,
+    currency: session.currency ?? undefined,
   };
+}
+
+export function getWebhookStripe() {
+  return getPlatformStripeClient();
 }
